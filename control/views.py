@@ -3,34 +3,37 @@ from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
 from rest_framework.response import Response
 from rest_framework import status
-import websockets
-import asyncio
+import websocket
+import threading
+import time
 
-# 비동기 함수
-async def connect_continuous(uri, stop_signal):
-    async with websockets.connect(uri) as websocket:
+def connect_continuous(uri, stop_signal):
+    ws = websocket.create_connection(uri)
+    try:
         while not stop_signal.is_set():
-            try:
-                await websocket.send("ping")
-                received_message = await websocket.recv()
-                print(f"Received Message: {received_message}")
-            except Exception as e:
-                print(f"Error: {e}")
-            await asyncio.sleep(5)
+            ws.send("ping")
+            received_message = ws.recv()
+            print(f"Received Message: {received_message}")
+            time.sleep(5)
+    except Exception as e:
+        print(f"Error: {e}")
+    finally:
+        ws.close()
 
-# 글로벌 변수로 태스크 관리
 running_task = None
+stop_signal = threading.Event()
 
 class StartView(APIView):
     @method_decorator(csrf_exempt)
     def dispatch(self, *args, **kwargs):
         return super().dispatch(*args, **kwargs)
 
-    async def get(self, request):
-        global running_task
-        if running_task is None or running_task.done():
-            stop_signal = asyncio.Event()
-            running_task = asyncio.create_task(connect_continuous("wss://stream.bybit.com/v5/public/linear", stop_signal))
+    def get(self, request):
+        global running_task, stop_signal
+        if running_task is None or not running_task.is_alive():
+            stop_signal.clear()
+            running_task = threading.Thread(target=connect_continuous, args=("wss://stream.bybit.com/v5/public/linear", stop_signal))
+            running_task.start()
         return Response({"status": "started"}, status=status.HTTP_200_OK)
 
 class EndView(APIView):
@@ -38,8 +41,7 @@ class EndView(APIView):
     def dispatch(self, *args, **kwargs):
         return super().dispatch(*args, **kwargs)
 
-    async def get(self, request):
-        global running_task
-        if running_task and not running_task.done():
-            running_task.cancel()
+    def get(self, request):
+        global stop_signal
+        stop_signal.set()
         return Response({"status": "stopped"}, status=status.HTTP_200_OK)
